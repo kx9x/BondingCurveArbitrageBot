@@ -126,6 +126,9 @@ if __name__ == '__main__':
                     if (profit_mint > last_profit[bonding_curve_address]):
                         last_profit[bonding_curve_address] = profit_mint
                         toaster.show_toast(settings.ARB_BOT_TOAST_NAME, res)
+                
+                if not can_profit_mint and not can_profit_burn:
+                    last_profit[bonding_curve_address] = 0
 
         seconds_to_sleep = 60
         print("{0}: sleep for {1} seconds".format(datetime.datetime.now(), seconds_to_sleep))
