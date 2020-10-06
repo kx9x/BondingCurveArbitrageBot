@@ -8,7 +8,7 @@ import datetime
 from win10toast import ToastNotifier
 
 class Arbitrage:
-    def __init__(self, bonding_curve_address, base_asset_address, swap_asset_address):
+    def __init__(self, bonding_curve_address, base_asset_address, swap_asset_address, max_asset_to_use = -1):
         self.bonding_curve_address = bonding_curve_address
         self.base_asset_address = base_asset_address
         self.swap_asset_address = swap_asset_address
@@ -22,14 +22,15 @@ class Arbitrage:
         self.swap_asset_symbol = self.swap_asset.functions.symbol().call()
 
         self.base_asset_balance = self.base_asset.functions.balanceOf(settings.MY_ADDRESS).call()
-        
+
         self.uni_router = w3.eth.contract(address=settings.UNISWAP_ROUTER_ADRESS, abi=etherscan.getAbi(settings.UNISWAP_ROUTER_ADRESS))
 
         self.burn_path = [self.base_asset_address, self.swap_asset_address, self.bonding_curve_address]
         self.mint_path = [self.bonding_curve_address, self.swap_asset_address, self.base_asset_address]
+        self.max_asset_to_use = max_asset_to_use
     
     def mint_output(self):
-        mint_amount = self.bonding_curve.functions.calculateContinuousMintReturn(self.base_asset_balance).call()
+        mint_amount = self.bonding_curve.functions.calculateContinuousMintReturn(self.asset_balance_to_use()).call()
         amount_out = self.uni_router.functions.getAmountsOut(mint_amount, self.mint_path).call()
         uniswap_route = "{0} {1} -> {2} {3} -> {4} {5}".format(amount_out[0] / 1e18, 
                                                     self.bonding_curve_symbol, amount_out[1] / 1e18,
@@ -37,13 +38,13 @@ class Arbitrage:
                                                     self.base_asset_symbol)
 
         mint_return = amount_out[2]
-        mint_route = "{0} {1} -> {2}".format(self.base_asset_balance / 1e18, self.base_asset_symbol, uniswap_route)
+        mint_route = "{0} {1} -> {2}".format(self.asset_balance_to_use() / 1e18, self.base_asset_symbol, uniswap_route)
 
         return (mint_return, mint_route)
 
 
     def burn_output(self):
-        amount_out = self.uni_router.functions.getAmountsOut(self.base_asset_balance, self.burn_path).call()
+        amount_out = self.uni_router.functions.getAmountsOut(self.asset_balance_to_use(), self.burn_path).call()
         uniswap_route = "{0} {1} -> {2} {3} -> {4} {5}".format(amount_out[0] / 1e18, 
                                             self.base_asset_symbol, amount_out[1] / 1e18,
                                             self.swap_asset_symbol, amount_out[2] / 1e18,
@@ -55,18 +56,18 @@ class Arbitrage:
 
     def is_burn_opportunity(self):
         burn_return, burn_route = self.burn_output()
-        base_asset_diff = (burn_return - self.base_asset_balance) / 1e18
+        base_asset_diff = (burn_return - self.asset_balance_to_use()) / 1e18
 
-        if (burn_return < self.base_asset_balance):
+        if (burn_return < self.asset_balance_to_use() or base_asset_diff < 6):
             return (False, base_asset_diff, burn_route)
         else:
             return (True, base_asset_diff, burn_route)
     
     def is_mint_opportunity(self):
         mint_return, mint_route = self.mint_output()
-        base_asset_diff = (mint_return - self.base_asset_balance) / 1e18
+        base_asset_diff = (mint_return - self.asset_balance_to_use()) / 1e18
 
-        if (mint_return < self.base_asset_balance):
+        if (mint_return < self.asset_balance_to_use() or base_asset_diff < 6):
             return (False, base_asset_diff, mint_route)
         else:
             return (True, base_asset_diff, mint_route)
@@ -80,6 +81,12 @@ class Arbitrage:
             return "\n".join(["Arb opportunity on {0}, woohoo!".format(strat_name), 
                              "You would gain {0} {1} on this trade".format(base_asset_diff, self.base_asset_symbol),
                              route])
+    
+    def update_balance(self):
+        self.base_asset_balance = self.base_asset.functions.balanceOf(settings.MY_ADDRESS).call()
+    
+    def asset_balance_to_use(self):
+        return self.base_asset_balance if self.max_asset_to_use == -1 else min(self.base_asset_balance, self.max_asset_to_use)
 
 if __name__ == '__main__':
     if not w3.isConnected():
@@ -89,23 +96,25 @@ if __name__ == '__main__':
     toaster = ToastNotifier()
     toaster.show_toast(settings.ARB_BOT_TOAST_NAME, "arb bot started")
 
-    bonding_curve_addresses = [settings.EMN_CONTRACT_ADDRESS, settings.GIL_CONTRACT_ADDRESS]
+    bonding_curve_addresses = {settings.EMN_CONTRACT_ADDRESS: -1, settings.GIL_CONTRACT_ADDRESS: 20000000000000000000}
 
     last_profit = {}
     arb_strats = {}
-    for bonding_curve in bonding_curve_addresses:
+    for bonding_curve, max_asset_to_use in bonding_curve_addresses.items():
         last_profit[bonding_curve] = 0
         arb_strats[bonding_curve] = Arbitrage(bonding_curve_address=bonding_curve,
                                         base_asset_address=settings.DAI_CONTRACT_ADDRESS,
-                                        swap_asset_address=settings.WETH_CONTRACT_ADDRESS)
+                                        swap_asset_address=settings.WETH_CONTRACT_ADDRESS,
+                                        max_asset_to_use=max_asset_to_use)
 
 
     while(True):
         print("{0}: trying to find profitable route".format(datetime.datetime.now()))
         for bonding_curve_address in bonding_curve_addresses:
             arbitrage = arb_strats[bonding_curve_address]
+            arbitrage.update_balance()
             if arbitrage.base_asset_balance == 0:
-                print("Warning: No {0} to spend!".format(base_asset_symbol))
+                print("Warning: No {0} to spend!".format(arbitrage.base_asset_symbol))
                 last_profit[bonding_curve] = 0
             else:
                 can_profit_burn, profit_burn, burn_route = arbitrage.is_burn_opportunity()
@@ -130,6 +139,6 @@ if __name__ == '__main__':
                 if not can_profit_mint and not can_profit_burn:
                     last_profit[bonding_curve_address] = 0
 
-        seconds_to_sleep = 60
+        seconds_to_sleep = 1
         print("{0}: sleep for {1} seconds".format(datetime.datetime.now(), seconds_to_sleep))
         time.sleep(seconds_to_sleep)
